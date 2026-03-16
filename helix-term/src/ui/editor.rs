@@ -8,8 +8,11 @@ use crate::{
     ui::{
         document::{render_document, LinePos, TextRenderer},
         statusline,
-        text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
-        Completion, ProgressSpinners,
+        text_decorations::{
+            self, Decoration, DecorationManager, FoldDecoration, InlineDiagnostics,
+            PluginDecoration,
+        },
+        Completion, NotificationPopup, ProgressSpinners,
     },
 };
 
@@ -19,22 +22,40 @@ use helix_core::{
     movement::Direction,
     syntax::{self, OverlayHighlights},
     text_annotations::TextAnnotations,
+    text_folding::RopeSliceFoldExt,
     unicode::width::UnicodeWidthStr,
     visual_offset_from_block, Change, Position, Range, Selection, Transaction,
 };
+use helix_loader::VERSION_AND_GIT_HASH;
 use helix_view::{
-    annotations::diagnostics::DiagnosticFilter,
-    document::{Mode, DEFAULT_LANGUAGE_NAME, SCRATCH_BUFFER_NAME},
-    editor::{CompleteAction, CursorShapeConfig},
+    // annotations::diagnostics::DiagnosticFilter,
+    document::{Mode, SCRATCH_BUFFER_NAME},
+    editor::{CompleteAction, CursorShapeConfig, InlineBlameConfig, InlineBlameShow},
     graphics::{Color, CursorKind, Modifier, Rect, Style},
     icons::ICONS,
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
-    Document, Editor, Theme, View,
+    Document,
+    DocumentId,
+    Editor,
+    Theme,
+    View,
 };
-use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
+use std::{
+    mem::take,
+    num::NonZeroUsize,
+    ops,
+    path::{PathBuf, MAIN_SEPARATOR, MAIN_SEPARATOR_STR},
+    rc::Rc,
+    sync::LazyLock,
+};
 
-use tui::{buffer::Buffer as Surface, text::Span};
+use tui::{
+    buffer::Buffer as Surface,
+    text::{Span, Spans},
+};
+
+use super::text_decorations::blame::InlineBlame;
 
 pub struct EditorView {
     pub keymaps: Keymaps,
@@ -43,8 +64,13 @@ pub struct EditorView {
     pub(crate) last_insert: (commands::MappableCommand, Vec<InsertEvent>),
     pub(crate) completion: Option<Completion>,
     spinners: ProgressSpinners,
+    bufferline_info: BufferLineInfo,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
+    bufferline_positions: Vec<u16>,
+    /// Tracks if there are prompt layers active (updated by compositor)
+    pub prompt_active: bool,
+    notification_popup: NotificationPopup,
 }
 
 #[derive(Debug, Clone)]
@@ -67,12 +93,271 @@ impl EditorView {
             last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
             completion: None,
             spinners: ProgressSpinners::default(),
+            bufferline_info: BufferLineInfo::default(),
             terminal_focused: true,
+            bufferline_positions: Vec::new(),
+            prompt_active: false,
+            notification_popup: NotificationPopup::new(),
         }
     }
 
     pub fn spinners_mut(&mut self) -> &mut ProgressSpinners {
         &mut self.spinners
+    }
+
+    pub fn render_welcome(theme: &Theme, view: &View, surface: &mut Surface, is_colorful: bool) {
+        /// Logo for Helix
+        const LOGO_STR: &str = "\
+**             
+*****        ::
+ ******** :::::
+     **::::::: 
+   ::::::::***=
+:::::::    ====
+::::    =======
+:---========   
+ =======--     
+===== -------- 
+==        -----
+             --";
+
+        /// Size of the maximum line of the logo
+        static LOGO_WIDTH: LazyLock<u16> = LazyLock::new(|| {
+            LOGO_STR
+                .lines()
+                .max_by(|line, other| line.len().cmp(&other.len()))
+                .unwrap_or("")
+                .len() as u16
+        });
+
+        /// Use when true color is not supported
+        static LOGO_NO_COLOR: LazyLock<Vec<Spans>> = LazyLock::new(|| {
+            LOGO_STR
+                .lines()
+                .map(|line| Spans(vec![Span::raw(line)]))
+                .collect()
+        });
+
+        /// The logo is colored using Helix's colors
+        static LOGO_WITH_COLOR: LazyLock<Vec<Spans>> = LazyLock::new(|| {
+            LOGO_STR
+                .lines()
+                .map(|line| {
+                    line.chars()
+                        .map(|ch| match ch {
+                            '*' | ':' | '=' | '-' => Span::styled(
+                                ch.to_string(),
+                                Style::new().fg(match ch {
+                                    // Dark purple
+                                    '*' => Color::Rgb(112, 107, 200),
+                                    // Dark blue
+                                    ':' => Color::Rgb(132, 221, 234),
+                                    // Bright purple
+                                    '=' => Color::Rgb(153, 123, 200),
+                                    // Bright blue
+                                    '-' => Color::Rgb(85, 197, 228),
+                                    _ => unreachable!(),
+                                }),
+                            ),
+                            ' ' => Span::raw(" "),
+                            _ => unreachable!("logo should only contain '*', ':', '=', '-' or ' '"),
+                        })
+                        .collect()
+                })
+                .collect()
+        });
+
+        /// How much space to put between the help text and the logo
+        const LOGO_LEFT_PADDING: u16 = 6;
+
+        // Shift the help text to the right by this amount, to add space
+        // for the logo
+        static HELP_X_LOGO_OFFSET: LazyLock<u16> =
+            LazyLock::new(|| *LOGO_WIDTH / 2 + LOGO_LEFT_PADDING / 2);
+
+        #[derive(PartialEq, PartialOrd, Eq, Ord)]
+        enum AlignLine {
+            Left,
+            Center,
+        }
+        use AlignLine::*;
+
+        let logo = if is_colorful {
+            &LOGO_WITH_COLOR
+        } else {
+            &LOGO_NO_COLOR
+        };
+
+        let empty_line = || (Spans::from(""), Left);
+
+        let raw_help_lines: [(Spans, AlignLine); 12] = [
+            (
+                vec![
+                    Span::raw("helix "),
+                    Span::styled(VERSION_AND_GIT_HASH, theme.get("comment")),
+                ]
+                .into(),
+                Center,
+            ),
+            empty_line(),
+            (
+                Span::styled(
+                    "A post-modern modal text editor",
+                    theme.get("ui.text").add_modifier(Modifier::ITALIC),
+                )
+                .into(),
+                Center,
+            ),
+            empty_line(),
+            (
+                vec![
+                    Span::styled(":tutor", theme.get("markup.raw")),
+                    Span::styled("<enter>", theme.get("comment")),
+                    Span::raw("       learn helix"),
+                ]
+                .into(),
+                Left,
+            ),
+            (
+                vec![
+                    Span::styled(":theme", theme.get("markup.raw")),
+                    Span::styled("<space><tab>", theme.get("comment")),
+                    Span::raw("  choose a theme"),
+                ]
+                .into(),
+                Left,
+            ),
+            (
+                vec![
+                    Span::styled("<space>e", theme.get("markup.raw")),
+                    Span::raw("            file explorer"),
+                ]
+                .into(),
+                Left,
+            ),
+            (
+                vec![
+                    Span::styled("<space>?", theme.get("markup.raw")),
+                    Span::raw("            see all commands"),
+                ]
+                .into(),
+                Left,
+            ),
+            (
+                vec![
+                    Span::styled(":quit", theme.get("markup.raw")),
+                    Span::styled("<enter>", theme.get("comment")),
+                    Span::raw("        quit helix"),
+                ]
+                .into(),
+                Left,
+            ),
+            empty_line(),
+            (
+                vec![
+                    Span::styled("docs: ", theme.get("ui.text")),
+                    Span::styled("docs.helix-editor.com", theme.get("markup.link.url")),
+                ]
+                .into(),
+                Center,
+            ),
+            empty_line(),
+        ];
+
+        debug_assert!(
+            raw_help_lines.len() >= LOGO_STR.lines().count(),
+            "help lines get chained with lines of logo. if there are not \
+             enough help lines, logo will be cut off. add `empty_line()`s if necessary"
+        );
+
+        let mut help_lines = Vec::with_capacity(raw_help_lines.len());
+        let mut len_of_longest_left_align = 0;
+        let mut len_of_longest_center_align = 0;
+
+        for (spans, align) in raw_help_lines {
+            let width = spans.width();
+            match align {
+                Left => len_of_longest_left_align = len_of_longest_left_align.max(width),
+                Center => len_of_longest_center_align = len_of_longest_center_align.max(width),
+            }
+            help_lines.push((spans, align));
+        }
+
+        let len_of_longest_left_align = len_of_longest_left_align as u16;
+
+        // the y-coordinate where we start drawing the welcome screen
+        let start_drawing_at_y =
+            view.area.y + (view.area.height / 2).saturating_sub(help_lines.len() as u16 / 2);
+
+        // x-coordinate of the center of the viewport
+        let x_view_center = view.area.x + view.area.width / 2;
+
+        // the x-coordinate where we start drawing the `AlignLine::Left` lines
+        // +2 to make the text look like more balanced relative to the center of the help
+        let start_drawing_left_align_at_x =
+            view.area.x + (view.area.width / 2).saturating_sub(len_of_longest_left_align / 2) + 2;
+
+        let are_any_left_aligned_lines_overflowing_x =
+            (start_drawing_left_align_at_x + len_of_longest_left_align) > view.area.width;
+
+        let are_any_center_aligned_lines_overflowing_x =
+            len_of_longest_center_align as u16 > view.area.width;
+
+        let is_help_x_overflowing =
+            are_any_left_aligned_lines_overflowing_x || are_any_center_aligned_lines_overflowing_x;
+
+        // we want `>=` so it does not get drawn over the status line
+        // (essentially, it WON'T be marked as "overflowing" if the help
+        // fully fits vertically in the viewport without touching the status line)
+        let is_help_y_overflowing = (help_lines.len() as u16) >= view.area.height;
+
+        // Not enough space to render the help text even without the logo. Render nothing.
+        if is_help_x_overflowing || is_help_y_overflowing {
+            return;
+        }
+
+        // At this point we know that there is enough vertical
+        // and horizontal space to render the help text
+
+        let width_of_help_with_logo = *LOGO_WIDTH + LOGO_LEFT_PADDING + len_of_longest_left_align;
+
+        // If there is not enough space to show LOGO + HELP, then don't show the logo at all
+        //
+        // If we get here we know that there IS enough space to show just the help
+        let show_logo = width_of_help_with_logo <= view.area.width;
+
+        // Each "help" line is effectively "chained" with a line of the logo (if present).
+        for (lines_drawn, (line, align)) in help_lines.iter().enumerate() {
+            // Where to start drawing `AlignLine::Left` rows
+            let x_start_left_help =
+                start_drawing_left_align_at_x + if show_logo { *HELP_X_LOGO_OFFSET } else { 0 };
+
+            // Where to start drawing `AlignLine::Center` rows
+            let x_start_center_help = x_view_center - line.width() as u16 / 2
+                + if show_logo { *HELP_X_LOGO_OFFSET } else { 0 };
+
+            // Where to start drawing rows for the "help" section
+            // Includes tips about commands. Excludes the logo.
+            let x_start_help = match align {
+                Left => x_start_left_help,
+                Center => x_start_center_help,
+            };
+
+            let y = start_drawing_at_y + lines_drawn as u16;
+
+            // Draw a single line of the help text
+            surface.set_spans(x_start_help, y, line, line.width() as u16);
+
+            if show_logo {
+                // Draw a single line of the logo
+                surface.set_spans(
+                    x_start_left_help - LOGO_LEFT_PADDING - *LOGO_WIDTH,
+                    y,
+                    &logo[lines_drawn],
+                    *LOGO_WIDTH,
+                );
+            }
+        }
     }
 
     pub fn render_view(
@@ -95,9 +380,15 @@ impl EditorView {
         let text_annotations = view.text_annotations(doc, Some(theme));
         let mut decorations = DecorationManager::default();
 
+        if !(is_focused && self.terminal_focused) {
+            surface.set_style(area, theme.get("ui.background.inactive"))
+        }
+
         if is_focused && config.cursorline {
             decorations.add_decoration(Self::cursorline(doc, view, theme));
         }
+
+        decorations.add_decoration(FoldDecoration::new(&text_annotations, theme));
 
         if is_focused && config.cursorcolumn {
             Self::highlight_cursorcolumn(doc, view, surface, theme, inner, &text_annotations);
@@ -117,8 +408,13 @@ impl EditorView {
             decorations.add_decoration(line_decoration);
         }
 
-        let syntax_highlighter =
-            Self::doc_syntax_highlighter(doc, view_offset.anchor, inner.height, &loader);
+        let syntax_highlighter = Self::doc_syntax_highlighter(
+            doc,
+            &text_annotations,
+            view_offset.anchor,
+            inner.height,
+            &loader,
+        );
         let mut overlays = Vec::new();
 
         overlays.push(Self::overlay_syntax_highlights(
@@ -133,9 +429,14 @@ impl EditorView {
             .and_then(|config| config.rainbow_brackets)
             .unwrap_or(config.rainbow_brackets)
         {
-            if let Some(overlay) =
-                Self::doc_rainbow_highlights(doc, view_offset.anchor, inner.height, theme, &loader)
-            {
+            if let Some(overlay) = Self::doc_rainbow_highlights(
+                doc,
+                &text_annotations,
+                view_offset.anchor,
+                inner.height,
+                theme,
+                &loader,
+            ) {
                 overlays.push(overlay);
             }
         }
@@ -155,7 +456,7 @@ impl EditorView {
             if let Some(tabstops) = Self::tabstop_highlights(doc, theme) {
                 overlays.push(tabstops);
             }
-            overlays.push(Self::doc_selection_highlights(
+            overlays.push(self.doc_selection_highlights(
                 editor.mode(),
                 doc,
                 view,
@@ -181,7 +482,16 @@ impl EditorView {
             );
         }
 
-        Self::render_rulers(editor, doc, view, inner, surface, theme);
+        Self::render_inline_blame(&config.inline_blame, doc, view, &mut decorations, theme);
+
+        if config.welcome_screen && doc.version() == 0 && doc.is_welcome {
+            Self::render_welcome(
+                theme,
+                view,
+                surface,
+                config.true_color || crate::true_color(),
+            );
+        }
 
         let primary_cursor = doc
             .selection(view.id)
@@ -206,6 +516,9 @@ impl EditorView {
             inline_diagnostic_config,
             config.end_of_line_diagnostics,
         ));
+
+        decorations.add_decoration(PluginDecoration::new(doc, theme, view.id));
+
         render_document(
             surface,
             inner,
@@ -217,6 +530,9 @@ impl EditorView {
             theme,
             decorations,
         );
+
+        // Draw rulers after document. Skip cells that already have content.
+        Self::render_rulers(editor, doc, view, inner, surface, theme);
 
         // if we're not at the edge of the screen, draw a right border
         if viewport.right() != view.area.right() {
@@ -230,21 +546,75 @@ impl EditorView {
             }
         }
 
-        if config.inline_diagnostics.disabled()
-            && config.end_of_line_diagnostics == DiagnosticFilter::Disable
-        {
-            Self::render_diagnostics(doc, view, inner, surface, theme);
-        }
+        // if config.inline_diagnostics.disabled()
+        //     && config.end_of_line_diagnostics == DiagnosticFilter::Disable
+        // {
+        //     Self::render_diagnostics(doc, view, inner, surface, theme);
+        // }
 
-        let statusline_area = view
-            .area
-            .clip_top(view.area.height.saturating_sub(1))
-            .clip_bottom(1); // -1 from bottom to remove commandline
+        // Statusline on the last row of the view area.
+        // The cmdline space reservation is handled at the top level in EditorView::render.
+        let statusline_area = view.area.clip_top(view.area.height.saturating_sub(1));
 
         let mut context =
             statusline::RenderContext::new(editor, doc, view, is_focused, &self.spinners);
 
         statusline::render(&mut context, statusline_area, surface);
+    }
+
+    fn render_inline_blame(
+        inline_blame: &InlineBlameConfig,
+        doc: &Document,
+        view: &View,
+        decorations: &mut DecorationManager,
+        theme: &Theme,
+    ) {
+        const INLINE_BLAME_SCOPE: &str = "ui.virtual.inline-blame";
+        let text = doc.text();
+        match inline_blame.show {
+            InlineBlameShow::Never => (),
+            InlineBlameShow::CursorLine => {
+                let cursor_line_idx = doc.cursor_line(view.id);
+
+                // do not render inline blame for empty lines to reduce visual noise
+                if text.line(cursor_line_idx) != doc.line_ending.as_str() {
+                    if let Ok(line_blame) =
+                        doc.line_blame(cursor_line_idx as u32, &inline_blame.format)
+                    {
+                        decorations.add_decoration(InlineBlame::new(
+                            theme.get(INLINE_BLAME_SCOPE),
+                            text_decorations::blame::LineBlame::OneLine((
+                                cursor_line_idx,
+                                line_blame,
+                            )),
+                        ));
+                    };
+                }
+            }
+            InlineBlameShow::AllLines => {
+                let mut blame_lines = vec![None; text.len_lines()];
+
+                let blame_for_all_lines = view.line_range(doc).filter_map(|line_idx| {
+                    // do not render inline blame for empty lines to reduce visual noise
+                    if text.line(line_idx) != doc.line_ending.as_str() {
+                        doc.line_blame(line_idx as u32, &inline_blame.format)
+                            .ok()
+                            .map(|blame| (line_idx, blame))
+                    } else {
+                        None
+                    }
+                });
+
+                for (line_idx, blame) in blame_for_all_lines {
+                    blame_lines[line_idx] = Some(blame);
+                }
+
+                decorations.add_decoration(InlineBlame::new(
+                    theme.get(INLINE_BLAME_SCOPE),
+                    text_decorations::blame::LineBlame::ManyLines(blame_lines),
+                ));
+            }
+        }
     }
 
     pub fn render_rulers(
@@ -256,10 +626,20 @@ impl EditorView {
         theme: &Theme,
     ) {
         let editor_rulers = &editor.config().rulers;
-
-        let style = theme
-            .try_get("ui.virtual.ruler")
-            .unwrap_or_else(|| Style::default().bg(Color::Red));
+        let ruler_char = &editor.config().ruler_char;
+        // Base style from theme for rulers
+        let base_style = theme.try_get("ui.virtual.ruler").unwrap_or_default();
+        // Background style is used only for background-style rulers. If theme lacks a bg, reuse fg.
+        let bg_style = if base_style.bg.is_none() {
+            if let Some(fg) = base_style.fg {
+                base_style.bg(fg)
+            } else {
+                // Fallback background to ensure visibility
+                Style::default().bg(Color::Red)
+            }
+        } else {
+            base_style
+        };
 
         let rulers = doc
             .language_config()
@@ -276,22 +656,47 @@ impl EditorView {
             .filter(|ruler| ruler < &viewport.width)
             .map(|ruler| viewport.clip_left(ruler).with_width(1))
             .for_each(|area| {
-                let icons = ICONS.load();
-                for y in area.y..area.height {
-                    surface.set_string(area.x, y, icons.ui().r#virtual().ruler(), style);
+                if ruler_char.is_empty() {
+                    // Background-style ruler: only apply to cells without content
+                    for y in area.top()..area.bottom() {
+                        let cell = &surface[(area.x, y)];
+                        // Skip cells that have non-whitespace content (like diagnostic bubbles)
+                        if cell.symbol == " " || cell.symbol.is_empty() {
+                            surface[(area.x, y)].set_style(bg_style);
+                        }
+                    }
+                } else {
+                    // Foreground glyph ruler: only draw on empty/space cells
+                    let mut glyph_style = base_style;
+                    glyph_style.bg = None;
+                    if glyph_style.fg.is_none() {
+                        glyph_style = glyph_style.fg(Color::Gray);
+                    }
+                    for y in area.top()..area.bottom() {
+                        let cell = &surface[(area.x, y)];
+                        // Only draw ruler glyph on empty/space cells to avoid overwriting content
+                        if cell.symbol == " " || cell.symbol.is_empty() {
+                            surface[(area.x, y)]
+                                .set_symbol(ruler_char)
+                                .set_style(glyph_style);
+                        }
+                    }
                 }
-            });
+            })
     }
 
     fn viewport_byte_range(
         text: helix_core::RopeSlice,
+        annotations: &TextAnnotations,
         row: usize,
         height: u16,
     ) -> std::ops::Range<usize> {
         // Calculate viewport byte ranges:
         // Saturating subs to make it inclusive zero indexing.
         let last_line = text.len_lines().saturating_sub(1);
-        let last_visible_line = (row + height as usize).saturating_sub(1).min(last_line);
+        let last_visible_line = text
+            .nth_next_folded_line(&annotations.folds, row, (height as usize).saturating_sub(1))
+            .min(last_line);
         let start = text.line_to_byte(row.min(last_line));
         let end = text.line_to_byte(last_visible_line + 1);
 
@@ -303,6 +708,7 @@ impl EditorView {
     /// directly to enable rendering syntax highlighted docs anywhere (eg. picker preview)
     pub fn doc_syntax_highlighter<'editor>(
         doc: &'editor Document,
+        annotations: &TextAnnotations,
         anchor: usize,
         height: u16,
         loader: &'editor syntax::Loader,
@@ -310,7 +716,7 @@ impl EditorView {
         let syntax = doc.syntax()?;
         let text = doc.text().slice(..);
         let row = text.char_to_line(anchor.min(text.len_chars()));
-        let range = Self::viewport_byte_range(text, row, height);
+        let range = Self::viewport_byte_range(text, annotations, row, height);
         let range = range.start as u32..range.end as u32;
 
         let highlighter = syntax.highlighter(text, loader, range);
@@ -326,7 +732,7 @@ impl EditorView {
         let text = doc.text().slice(..);
         let row = text.char_to_line(anchor.min(text.len_chars()));
 
-        let mut range = Self::viewport_byte_range(text, row, height);
+        let mut range = Self::viewport_byte_range(text, text_annotations, row, height);
         range = text.byte_to_char(range.start)..text.byte_to_char(range.end);
 
         text_annotations.collect_overlay_highlights(range)
@@ -334,6 +740,7 @@ impl EditorView {
 
     pub fn doc_rainbow_highlights(
         doc: &Document,
+        annotations: &TextAnnotations,
         anchor: usize,
         height: u16,
         theme: &Theme,
@@ -342,7 +749,7 @@ impl EditorView {
         let syntax = doc.syntax()?;
         let text = doc.text().slice(..);
         let row = text.char_to_line(anchor.min(text.len_chars()));
-        let visible_range = Self::viewport_byte_range(text, row, height);
+        let visible_range = Self::viewport_byte_range(text, annotations, row, height);
         let start = syntax::child_for_byte_range(
             &syntax.tree().root_node(),
             visible_range.start as u32..visible_range.end as u32,
@@ -530,7 +937,8 @@ impl EditorView {
     }
 
     /// Get highlight spans for selections in a document view.
-    pub fn doc_selection_highlights(
+    fn doc_selection_highlights(
+        &self,
         mode: Mode,
         doc: &Document,
         view: &View,
@@ -584,12 +992,9 @@ impl EditorView {
 
             // Special-case: cursor at end of the rope.
             if range.head == range.anchor && range.head == text.len_chars() {
-                if !selection_is_primary || (cursor_is_block && is_terminal_focused) {
-                    // Bar and underline cursors are drawn by the terminal
-                    // BUG: If the editor area loses focus while having a bar or
-                    // underline cursor (eg. when a regex prompt has focus) then
-                    // the primary cursor will be invisible. This doesn't happen
-                    // with block cursors since we manually draw *all* cursors.
+                if !selection_is_primary || !is_terminal_focused || self.prompt_active {
+                    // Primary cursor is drawn by the terminal when focused and no prompt is active
+                    // Secondary cursors, unfocused primary cursor, and editor cursor when prompt is active are drawn manually
                     spans.push((cursor_scope, range.head..range.head + 1));
                 }
                 continue;
@@ -607,17 +1012,17 @@ impl EditorView {
                         cursor_start
                     };
                 spans.push((selection_scope, range.anchor..selection_end));
-                // add block cursors
-                // skip primary cursor if terminal is unfocused - terminal cursor is used in that case
-                if !selection_is_primary || (cursor_is_block && is_terminal_focused) {
+                // add cursors
+                // skip primary cursor if terminal is focused and no prompt is active - terminal cursor is used in that case
+                if !selection_is_primary || !is_terminal_focused || self.prompt_active {
                     spans.push((cursor_scope, cursor_start..range.head));
                 }
             } else {
                 // Reverse case.
                 let cursor_end = next_grapheme_boundary(text, range.head);
-                // add block cursors
-                // skip primary cursor if terminal is unfocused - terminal cursor is used in that case
-                if !selection_is_primary || (cursor_is_block && is_terminal_focused) {
+                // add cursors
+                // skip primary cursor if terminal is focused and no prompt is active - terminal cursor is used in that case
+                if !selection_is_primary || !is_terminal_focused || self.prompt_active {
                     spans.push((cursor_scope, range.head..cursor_end));
                 }
                 // non block cursors look like they exclude the cursor
@@ -662,8 +1067,8 @@ impl EditorView {
     }
 
     /// Render bufferline at the top
-    pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
-        let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
+    pub fn render_bufferline(&mut self, editor: &Editor, viewport: Rect, surface: &mut Surface) {
+        self.bufferline_positions.clear();
         surface.clear_with(
             viewport,
             editor
@@ -682,17 +1087,95 @@ impl EditorView {
             .try_get("ui.bufferline")
             .unwrap_or_else(|| editor.theme.get("ui.statusline.inactive"));
 
-        let mut x = viewport.x;
         let current_doc = view!(editor).doc;
 
-        for doc in editor.documents() {
-            let fname = doc
-                .path()
-                .unwrap_or(&scratch)
-                .file_name()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or_default();
+        self.bufferline_info.clear();
+
+        // First pass: calculate all buffer positions and determine if scrolling is needed
+        let mut total_width = 0u16;
+        let mut buffer_texts = Vec::new();
+        let mut buffer_widths = Vec::new();
+
+        for (idx, doc) in editor.documents().enumerate() {
+            let fname = Self::make_document_name(doc, editor);
+
+            // Add separator width if not the first document
+            if idx > 0 {
+                let sep = &editor.config().bufferline.separator;
+                total_width += sep.len() as u16;
+            }
+
+            let icons = ICONS.load();
+
+            let text = if let Some(icon) = icons.mime().get(doc.path(), doc.language_name()) {
+                format!(
+                    " {}  {} {}",
+                    icon.glyph(),
+                    fname,
+                    if doc.is_modified() { "[+] " } else { "" }
+                )
+            } else {
+                format!(" {} {}", fname, if doc.is_modified() { "[+] " } else { "" })
+            };
+
+            self.bufferline_positions.push(total_width);
+            let text_width = text.len() as u16;
+            buffer_texts.push(text);
+            buffer_widths.push(text_width);
+            total_width += text_width;
+        }
+
+        // Determine scroll offset
+        let scroll_offset =
+            if let Some(current_idx) = editor.documents().position(|d| d.id() == current_doc) {
+                if let Some(&target_x) = self.bufferline_positions.get(current_idx) {
+                    if target_x >= viewport.width / 2 {
+                        target_x
+                            .saturating_sub(viewport.width / 2)
+                            .min(total_width.saturating_sub(viewport.width))
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+        // Second pass: render with the calculated offset
+        for (idx, doc) in editor.documents().enumerate() {
+            let buffer_x = self.bufferline_positions[idx];
+            let text = &buffer_texts[idx];
+
+            // Render separator if not first document
+            if idx > 0 {
+                let sep = &editor.config().bufferline.separator;
+                let sep_x = buffer_x
+                    .saturating_sub(sep.len() as u16)
+                    .saturating_sub(scroll_offset);
+                if sep_x < viewport.width {
+                    let render_x = viewport.x + sep_x;
+                    surface.set_stringn(
+                        render_x,
+                        viewport.y,
+                        sep,
+                        (viewport.width - sep_x) as usize,
+                        bufferline_inactive,
+                    );
+                }
+            }
+
+            // Skip buffers that are completely outside the visible area
+            let render_x = buffer_x.saturating_sub(scroll_offset);
+            if render_x >= viewport.width {
+                break;
+            }
+
+            // Skip buffers that end before the visible area
+            if buffer_x + buffer_widths[idx] < scroll_offset {
+                continue;
+            }
 
             let style = if current_doc == doc.id() {
                 bufferline_active
@@ -700,40 +1183,90 @@ impl EditorView {
                 bufferline_inactive
             };
 
-            let icons = ICONS.load();
+            let mut visible_text = text.clone();
+            let mut text_start_x = render_x;
 
-            let lang = doc.language_name().unwrap_or(DEFAULT_LANGUAGE_NAME);
-
-            if let Some(icon) = icons
-                .fs()
-                .from_optional_path_or_lang(doc.path().map(|path| path.as_path()), lang)
-            {
-                let used_width = viewport.x.saturating_sub(x);
-                let rem_width = surface.area.width.saturating_sub(used_width);
-
-                let style = icon.color().map_or(style, |color| style.fg(color));
-
-                x = surface
-                    .set_stringn(x, viewport.y, format!(" {icon}"), rem_width as usize, style)
-                    .0;
-
-                if x >= surface.area.right() {
-                    break;
-                }
+            // Clip text if it starts before the visible area
+            if buffer_x < scroll_offset {
+                let chars_to_skip = (scroll_offset - buffer_x) as usize;
+                visible_text = text.chars().skip(chars_to_skip).collect();
+                text_start_x = viewport.x;
             }
 
-            let text = format!(" {} {}", fname, if doc.is_modified() { "[+] " } else { "" });
+            let actual_render_x = viewport.x + text_start_x;
+            let available_width = viewport.width.saturating_sub(text_start_x);
 
-            let used_width = viewport.x.saturating_sub(x);
-            let rem_width = surface.area.width.saturating_sub(used_width);
+            surface.set_stringn(
+                actual_render_x,
+                viewport.y,
+                &visible_text,
+                available_width as usize,
+                style,
+            );
 
-            x = surface
-                .set_stringn(x, viewport.y, text, rem_width as usize, style)
-                .0;
+            // Track buffer info for mouse clicks (adjust for scroll offset)
+            let start_x = actual_render_x;
+            let end_x =
+                (actual_render_x + visible_text.len() as u16).min(viewport.x + viewport.width);
+            self.bufferline_info
+                .add_buffer_info(doc.id(), start_x..end_x);
+        }
+    }
 
-            if x >= surface.area.right() {
-                break;
+    fn make_document_name(doc: &Document, editor: &Editor) -> String {
+        let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
+
+        let paths: Vec<String> = editor
+            .documents()
+            .map(|d| {
+                d.path()
+                    .unwrap_or(&scratch)
+                    .to_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+
+        let components: Vec<Vec<String>> = paths
+            .iter()
+            .map(|p| p.split(MAIN_SEPARATOR).map(String::from).collect())
+            .collect();
+
+        let doc_path = doc
+            .path()
+            .unwrap_or(&scratch)
+            .to_str()
+            .unwrap_or_default()
+            .to_string();
+
+        let doc_index = paths.iter().position(|p| p == &doc_path).unwrap();
+        let doc_components_len = components[doc_index].len();
+
+        let mut k = 1;
+
+        loop {
+            let start = doc_components_len.saturating_sub(k);
+            let curr_doc: Vec<&str> = components[doc_index][start..]
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+
+            let count = components
+                .iter()
+                .enumerate()
+                .filter(|&(index, _)| index != doc_index)
+                .filter(|&(_, parts)| {
+                    let len = parts.len();
+                    let start = len.saturating_sub(k);
+                    parts[start..] == curr_doc
+                })
+                .count();
+
+            if count == 0 {
+                return curr_doc.join(MAIN_SEPARATOR_STR);
             }
+
+            k += 1;
         }
     }
 
@@ -1002,6 +1535,9 @@ impl EditorView {
                 }
             }
             KeymapResult::NotFound | KeymapResult::Cancelled(_) => return Some(key_result),
+            KeymapResult::Fallback(fallback, ch) => {
+                fallback.execute(cxt, *ch);
+            }
         }
         None
     }
@@ -1251,6 +1787,22 @@ impl EditorView {
             MouseEventKind::Down(MouseButton::Left) => {
                 let editor = &mut cxt.editor;
 
+                let config = editor.config();
+                let bufferline_visible = match config.bufferline.render_mode {
+                    helix_view::editor::BufferLineRenderMode::Always => true,
+                    helix_view::editor::BufferLineRenderMode::Multiple => {
+                        editor.documents.len() > 1
+                    }
+                    _ => false,
+                };
+                if bufferline_visible && row == 0 {
+                    if let Some(buffer_info) = self.bufferline_info.get_clicked_buffer(column) {
+                        editor.switch(buffer_info.document_id, helix_view::editor::Action::Replace);
+                    }
+
+                    return EventResult::Consumed(None);
+                }
+
                 if let Some((pos, view_id)) = pos_and_view(editor, row, column, true) {
                     editor.focus(view_id);
 
@@ -1471,6 +2023,7 @@ impl Component for EditorView {
             callback: Vec::new(),
             on_next_key_callback: None,
             jobs: context.jobs,
+            plugin_manager: context.plugin_manager.clone(),
         };
 
         match event {
@@ -1519,6 +2072,7 @@ impl Component for EditorView {
                                         editor: cx.editor,
                                         jobs: cx.jobs,
                                         scroll: None,
+                                        plugin_manager: cx.plugin_manager.clone(),
                                     };
 
                                     if let EventResult::Consumed(callback) =
@@ -1606,6 +2160,23 @@ impl Component for EditorView {
             Event::Mouse(event) => self.handle_mouse_event(event, &mut cx),
             Event::IdleTimeout => self.handle_idle_timeout(&mut cx),
             Event::FocusGained => {
+                if context.editor.config().auto_reload.focus_gained
+                    && crate::handlers::auto_reload::count_externally_modified_documents(
+                        context.editor.documents(),
+                    ) > 0
+                {
+                    if let Err(e) = commands::typed::reload_all(
+                        context,
+                        helix_core::command_line::Args::default(),
+                        super::PromptEvent::Validate,
+                    ) {
+                        context.editor.set_error(format!("{}", e));
+                    } else {
+                        context
+                            .editor
+                            .set_status("Reloaded files due to external changes");
+                    }
+                }
                 self.terminal_focused = true;
                 EventResult::Consumed(None)
             }
@@ -1632,15 +2203,22 @@ impl Component for EditorView {
         let config = cx.editor.config();
 
         // check if bufferline should be rendered
-        use helix_view::editor::BufferLine;
-        let use_bufferline = match config.bufferline {
-            BufferLine::Always => true,
-            BufferLine::Multiple if cx.editor.documents.len() > 1 => true,
+        use helix_view::editor::BufferLineRenderMode;
+        let use_bufferline = match config.bufferline.render_mode {
+            BufferLineRenderMode::Always => true,
+            BufferLineRenderMode::Multiple if cx.editor.documents.len() > 1 => true,
             _ => false,
         };
 
-        // -1 for commandline and -1 for bufferline
-        let mut editor_area = area.clip_bottom(1);
+        // Reserve bottom row for commandline only when NOT using popup with full-height
+        let mut editor_area = if config.cmdline.style == helix_view::editor::CmdlineStyle::Popup
+            && config.cmdline.use_full_height
+        {
+            area // Use full height
+        } else {
+            area.clip_bottom(1) // Reserve for commandline
+        };
+
         if use_bufferline {
             editor_area = editor_area.clip_top(1);
         }
@@ -1649,7 +2227,7 @@ impl Component for EditorView {
         cx.editor.resize(editor_area);
 
         if use_bufferline {
-            Self::render_bufferline(cx.editor, area.with_height(1), surface);
+            self.render_bufferline(cx.editor, area.with_height(1), surface);
         }
 
         for (view, is_focused) in cx.editor.tree.views() {
@@ -1726,22 +2304,54 @@ impl Component for EditorView {
         if let Some(completion) = self.completion.as_mut() {
             completion.render(area, surface, cx);
         }
+
+        // Cleanup expired notifications before rendering
+        cx.editor.cleanup_notifications();
+
+        // Render notification popup
+        self.notification_popup.render(area, surface, cx);
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
-        match editor.cursor() {
-            // all block cursors are drawn manually
-            (pos, CursorKind::Block) => {
-                if self.terminal_focused {
-                    (pos, CursorKind::Hidden)
-                } else {
-                    // use terminal cursor when terminal loses focus
-                    (pos, CursorKind::Underline)
-                }
-            }
-            cursor => cursor,
+        let (pos, kind) = editor.cursor();
+        if self.terminal_focused {
+            (pos, kind)
+        } else {
+            // use underline cursor when terminal loses focus for visibility
+            (pos, CursorKind::Underline)
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct BufferLineInfo {
+    visible_buffers: Vec<BufferInfo>,
+}
+
+impl BufferLineInfo {
+    fn clear(&mut self) {
+        self.visible_buffers.clear();
+    }
+
+    fn add_buffer_info(&mut self, document_id: DocumentId, columns: std::ops::Range<u16>) {
+        self.visible_buffers.push(BufferInfo {
+            document_id,
+            columns,
+        });
+    }
+
+    fn get_clicked_buffer(&self, column: u16) -> Option<&BufferInfo> {
+        self.visible_buffers
+            .iter()
+            .find(|cell| cell.columns.contains(&column))
+    }
+}
+
+#[derive(Debug)]
+struct BufferInfo {
+    document_id: DocumentId,
+    // The bufferline column span used to show the document name
+    columns: std::ops::Range<u16>,
 }
 
 fn canonicalize_key(key: &mut KeyEvent) {

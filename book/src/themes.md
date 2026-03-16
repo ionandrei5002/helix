@@ -303,6 +303,7 @@ These scopes are used for theming the editor interface:
 | Key                               | Notes                                                                                          |
 | ---                               | ---                                                                                            |
 | `ui.background`                   |                                                                                                |
+| `ui.background.inactive`          | Background of unfocused document                                                               |
 | `ui.background.separator`         | Picker separator below input line                                                              |
 | `ui.cursor`                       |                                                                                                |
 | `ui.cursor.normal`                |                                                                                                |
@@ -349,6 +350,7 @@ These scopes are used for theming the editor interface:
 | `ui.virtual.inlay-hint.type`      | Style for inlay hints of kind `type` (language servers are not required to set a kind)         |
 | `ui.virtual.wrap`                 | Soft-wrap indicator (see the [`editor.soft-wrap` config][editor-section])                      |
 | `ui.virtual.jump-label`           | Style for virtual jump labels                                                                  |
+| `ui.virtual.inline-blame`         | Inline blame indicator (see the [`editor.inline-blame` config][editor-section])                |
 | `ui.menu`                         | Code and command completion menus                                                              |
 | `ui.menu.selected`                | Selected autocomplete item                                                                     |
 | `ui.menu.scroll`                  | `fg` sets thumb color, `bg` sets track color of scrollbar                                      |

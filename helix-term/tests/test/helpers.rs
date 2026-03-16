@@ -8,7 +8,7 @@ use std::{
 use anyhow::bail;
 use helix_core::{diagnostic::Severity, test, Selection, Transaction};
 use helix_term::{application::Application, args::Args, config::Config, keymap::merge_keys};
-use helix_view::{current_ref, doc, editor::LspConfig, input::parse_macro, Editor};
+use helix_view::{current_ref, doc, input::parse_macro, Editor};
 use tempfile::NamedTempFile;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -18,11 +18,12 @@ use crossterm::event::{Event, KeyEvent};
 use termina::event::{Event, KeyEvent};
 
 /// Specify how to set up the input text with line feeds
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum LineFeedHandling {
     /// Replaces all LF chars with the system's appropriate line feed character,
     /// and if one doesn't exist already, appends the system's appropriate line
     /// ending to the end of a string.
+    #[default]
     Native,
 
     /// Do not modify the input text in any way. What you give is what you test.
@@ -51,12 +52,6 @@ impl LineFeedHandling {
     }
 }
 
-impl Default for LineFeedHandling {
-    fn default() -> Self {
-        Self::Native
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct TestCase {
     pub in_text: String,
@@ -65,6 +60,7 @@ pub struct TestCase {
     pub out_text: String,
     pub out_selection: Selection,
 
+    #[allow(dead_code)]
     pub line_feed_handling: LineFeedHandling,
 }
 
@@ -289,6 +285,7 @@ pub fn test_config() -> Config {
 }
 
 pub fn test_editor_config() -> helix_view::editor::Config {
+    use helix_view::editor::LspConfig;
     helix_view::editor::Config {
         lsp: LspConfig {
             enable: false,
@@ -429,7 +426,7 @@ pub fn reload_file(file: &mut NamedTempFile) -> anyhow::Result<()> {
     let f = std::fs::OpenOptions::new()
         .write(true)
         .read(true)
-        .open(&path)?;
+        .open(path)?;
     *file.as_file_mut() = f;
     Ok(())
 }

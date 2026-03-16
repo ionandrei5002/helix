@@ -26,6 +26,22 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "home" => goto_line_start,
         "end" => goto_line_end,
 
+        "A-w" => { "Alter Window"
+            "A-h"|"A-left" |"h"|"left" => shrink_buffer_width,
+            "A-l"|"A-right"|"l"|"right" => grow_buffer_width,
+            "A-j"|"A-down" |"j"|"down" => shrink_buffer_height,
+            "A-k"|"A-up"   |"k"|"up" => grow_buffer_height,
+            "A-f"|"f" => toggle_focus_window,
+        },
+
+        "A-W" => { "Alter Window" sticky=true
+            "h"|"left" => shrink_buffer_width,
+            "l"|"right" => grow_buffer_width,
+            "j"|"down" => shrink_buffer_height,
+            "k"|"up" => grow_buffer_height,
+            "f" => toggle_focus_window,
+        },
+
         "w" => move_next_word_start,
         "b" => move_prev_word_start,
         "e" => move_next_word_end,
@@ -105,10 +121,34 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "s" => surround_add,
             "r" => surround_replace,
             "d" => surround_delete,
-            "a" => select_textobject_around,
-            "i" => select_textobject_inner,
+            "i" => { "Match inside" fallback=select_textobject_inside_surrounding_pair
+                "w" => select_textobject_inside_word,
+                "W" => select_textobject_inside_WORD,
+                "p" => select_textobject_inside_paragraph,
+                "t" => select_textobject_inside_type,
+                "f" => select_textobject_inside_function,
+                "a" => select_textobject_inside_parameter,
+                "c" => select_textobject_inside_comment,
+                "T" => select_textobject_inside_test,
+                "e" => select_textobject_inside_entry,
+                "m" => select_textobject_inside_closest_surrounding_pair,
+                "g" => select_textobject_inside_change,
+            },
+            "a" => { "Match around" fallback=select_textobject_around_surrounding_pair
+                "w" => select_textobject_around_word,
+                "W" => select_textobject_around_WORD,
+                "p" => select_textobject_around_paragraph,
+                "t" => select_textobject_around_type,
+                "f" => select_textobject_around_function,
+                "a" => select_textobject_around_parameter,
+                "c" => select_textobject_around_comment,
+                "T" => select_textobject_around_test,
+                "e" => select_textobject_around_entry,
+                "m" => select_textobject_around_closest_surrounding_pair,
+                "g" => select_textobject_around_change,
+            },
         },
-        "[" => { "Left bracket"
+        "[" => { "Left bracket" fallback=select_textobject_inside_prev_pair
             "d" => goto_prev_diag,
             "D" => goto_first_diag,
             "g" => goto_prev_change,
@@ -123,7 +163,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "x" => goto_prev_xml_element,
             "space" => add_newline_above,
         },
-        "]" => { "Right bracket"
+        "]" => { "Right bracket" fallback=select_textobject_inside_next_pair
             "d" => goto_next_diag,
             "D" => goto_last_diag,
             "g" => goto_next_change,
@@ -189,6 +229,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "C-f" | "pagedown" => page_down,
         "C-u" => page_cursor_half_up,
         "C-d" => page_cursor_half_down,
+        "C-k" => move_lines_up,
+        "C-j" => move_lines_down,
 
         "C-w" => { "Window"
             "C-w" | "w" => rotate_view,
@@ -203,10 +245,10 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "C-j" | "j" | "down" => jump_view_down,
             "C-k" | "k" | "up" => jump_view_up,
             "C-l" | "l" | "right" => jump_view_right,
-            "L" => swap_view_right,
-            "K" => swap_view_up,
-            "H" => swap_view_left,
-            "J" => swap_view_down,
+            "H" | "S-left" => swap_view_left,
+            "J" | "S-down" => swap_view_down,
+            "K" | "S-up" => swap_view_up,
+            "L" | "S-right" => swap_view_right,
             "n" => { "New split scratch buffer"
                 "C-s" | "s" => hsplit_new,
                 "C-v" | "v" => vsplit_new,
@@ -270,10 +312,10 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
                 "C-j" | "j" | "down" => jump_view_down,
                 "C-k" | "k" | "up" => jump_view_up,
                 "C-l" | "l" | "right" => jump_view_right,
-                "H" => swap_view_left,
-                "J" => swap_view_down,
-                "K" => swap_view_up,
-                "L" => swap_view_right,
+                "H" | "S-left" => swap_view_left,
+                "J" | "S-down" => swap_view_down,
+                "K" | "S-up" => swap_view_up,
+                "L" | "S-right" => swap_view_right,
                 "n" => { "New split scratch buffer"
                     "C-s" | "s" => hsplit_new,
                     "C-v" | "v" => vsplit_new,
@@ -285,13 +327,17 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "P" => paste_clipboard_before,
             "R" => replace_selections_with_clipboard,
             "/" => global_search,
+            "l" => local_search_grep,
+            "L" => local_search_fuzzy,
             "k" => hover,
+            "K" => goto_hover,
             "r" => rename_symbol,
             "h" => select_references_to_symbol_under_cursor,
             "c" => toggle_comments,
             "C" => toggle_block_comments,
             "A-c" => toggle_line_comments,
             "?" => command_palette,
+            "B" => blame_line,
         },
         "z" => { "View"
             "z" | "c" => align_view_center,
@@ -304,6 +350,10 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "C-f" | "pagedown" => page_down,
             "C-u" | "backspace" => page_cursor_half_up,
             "C-d" | "space" => page_cursor_half_down,
+
+            "f" => fold,
+            "F" => unfold,
+            "A-f" => toggle_fold,
 
             "/" => search,
             "?" => rsearch,
@@ -321,6 +371,10 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "C-f" | "pagedown" => page_down,
             "C-u" | "backspace" => page_cursor_half_up,
             "C-d" | "space" => page_cursor_half_down,
+
+            "f" => fold,
+            "F" => unfold,
+            "A-f" => toggle_fold,
 
             "/" => search,
             "?" => rsearch,

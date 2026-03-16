@@ -1,10 +1,14 @@
+mod cmdline_popup;
 mod completion;
 mod document;
 pub(crate) mod editor;
+mod file_explorer;
+pub mod gradient_border;
 mod info;
 pub mod lsp;
 mod markdown;
 pub mod menu;
+mod notification_popup;
 pub mod overlay;
 pub mod picker;
 pub mod popup;
@@ -18,13 +22,16 @@ mod text_decorations;
 use crate::compositor::Compositor;
 use crate::filter_picker_entry;
 use crate::job::{self, Callback};
+pub use cmdline_popup::CmdlinePopup;
 pub use completion::Completion;
 pub use editor::EditorView;
+pub use file_explorer::file_explorer;
 use helix_stdx::rope;
 use helix_view::icons::ICONS;
 use helix_view::theme::Style;
 pub use markdown::Markdown;
 pub use menu::Menu;
+pub use notification_popup::NotificationPopup;
 pub use picker::{Column as PickerColumn, FileLocation, Picker};
 pub use popup::Popup;
 pub use prompt::{Prompt, PromptEvent};
@@ -32,6 +39,7 @@ pub use select::Select;
 pub use spinner::{ProgressSpinners, Spinner};
 pub use text::Text;
 
+use helix_view::editor::CmdlineStyle;
 use helix_view::Editor;
 use tui::text::{Span, Spans, ToSpan};
 use tui::widgets::Cell;
@@ -106,105 +114,172 @@ pub fn raw_regex_prompt(
     let offset_snapshot = doc.view_offset(view.id);
     let config = cx.editor.config();
 
-    let mut prompt = Prompt::new(
-        prompt,
-        history_register,
-        completion_fn,
-        move |cx: &mut crate::compositor::Context, input: &str, event: PromptEvent| {
-            match event {
-                PromptEvent::Abort => {
-                    let (view, doc) = current!(cx.editor);
-                    doc.set_selection(view.id, snapshot.clone());
-                    doc.set_view_offset(view.id, offset_snapshot);
-                }
-                PromptEvent::Update | PromptEvent::Validate => {
-                    // skip empty input
-                    if input.is_empty() {
-                        return;
-                    }
-
-                    let case_insensitive = if config.search.smart_case {
-                        !input.chars().any(char::is_uppercase)
-                    } else {
-                        false
-                    };
-
-                    match rope::RegexBuilder::new()
-                        .syntax(
-                            rope::Config::new()
-                                .case_insensitive(case_insensitive)
-                                .multi_line(true),
-                        )
-                        .build(input)
-                    {
-                        Ok(regex) => {
-                            let (view, doc) = current!(cx.editor);
-
-                            // revert state to what it was before the last update
-                            doc.set_selection(view.id, snapshot.clone());
-
-                            if event == PromptEvent::Validate {
-                                // Equivalent to push_jump to store selection just before jump
-                                view.jumps.push((doc_id, snapshot.clone()));
-                            }
-
-                            fun(cx, regex, input, event);
-
-                            let (view, doc) = current!(cx.editor);
-                            view.ensure_cursor_in_view(doc, config.scrolloff);
-                        }
-                        Err(err) => {
+    match config.cmdline.style {
+        CmdlineStyle::Popup => {
+            let cmdline = CmdlinePopup::new(
+                prompt,
+                history_register,
+                completion_fn,
+                move |cx: &mut crate::compositor::Context, input: &str, event: PromptEvent| {
+                    match event {
+                        PromptEvent::Abort => {
                             let (view, doc) = current!(cx.editor);
                             doc.set_selection(view.id, snapshot.clone());
                             doc.set_view_offset(view.id, offset_snapshot);
+                        }
+                        PromptEvent::Update | PromptEvent::Validate => {
+                            if input.is_empty() {
+                                return;
+                            }
 
-                            if event == PromptEvent::Validate {
-                                let callback = async move {
-                                    let call: job::Callback = Callback::EditorCompositor(Box::new(
-                                        move |_editor: &mut Editor, compositor: &mut Compositor| {
-                                            let contents = Text::new(format!("{}", err));
-                                            let size = compositor.size();
-                                            let popup = Popup::new("invalid-regex", contents)
-                                                .position(Some(helix_core::Position::new(
-                                                    size.height as usize - 2, // 2 = statusline + commandline
-                                                    0,
-                                                )))
-                                                .auto_close(true);
-                                            compositor.replace_or_push("invalid-regex", popup);
-                                        },
-                                    ));
-                                    Ok(call)
-                                };
+                            let case_insensitive = if config.search.smart_case {
+                                !input.chars().any(char::is_uppercase)
+                            } else {
+                                false
+                            };
 
-                                cx.jobs.callback(callback);
+                            match rope::RegexBuilder::new()
+                                .syntax(
+                                    rope::Config::new()
+                                        .case_insensitive(case_insensitive)
+                                        .multi_line(true),
+                                )
+                                .build(input)
+                            {
+                                Ok(regex) => {
+                                    let (view, doc) = current!(cx.editor);
+                                    doc.set_selection(view.id, snapshot.clone());
+
+                                    if event == PromptEvent::Validate {
+                                        view.jumps.push((doc_id, snapshot.clone()));
+                                    }
+
+                                    fun(cx, regex, input, event);
+
+                                    let (view, doc) = current!(cx.editor);
+                                    view.ensure_cursor_in_view(doc, config.scrolloff);
+                                }
+                                Err(err) => {
+                                    let (view, doc) = current!(cx.editor);
+                                    doc.set_selection(view.id, snapshot.clone());
+                                    doc.set_view_offset(view.id, offset_snapshot);
+
+                                    if event == PromptEvent::Validate {
+                                        let callback = async move {
+                                            let call: job::Callback = Callback::EditorCompositor(Box::new(
+                                                move |_editor: &mut Editor, compositor: &mut Compositor| {
+                                                    let contents = Text::new(format!("{}", err));
+                                                    let size = compositor.size();
+                                                    let popup = Popup::new("invalid-regex", contents)
+                                                        .position(Some(helix_core::Position::new(
+                                                            size.height as usize - 2,
+                                                            0,
+                                                        )))
+                                                        .auto_close(true);
+                                                    compositor.replace_or_push("invalid-regex", popup);
+                                                },
+                                            ));
+                                            Ok(call)
+                                        };
+
+                                        cx.jobs.callback(callback);
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-        },
-    )
-    .with_language("regex", std::sync::Arc::clone(&cx.editor.syn_loader));
-    // Calculate initial completion
-    prompt.recalculate_completion(cx.editor);
-    // prompt
-    cx.push_layer(Box::new(prompt));
-}
+                },
+                CmdlineStyle::Popup,
+            )
+            .with_language("regex", std::sync::Arc::clone(&cx.editor.syn_loader));
 
-/// We want to exclude files that the editor can't handle yet
-fn get_excluded_types() -> ignore::types::Types {
-    use ignore::types::TypesBuilder;
-    let mut type_builder = TypesBuilder::new();
-    type_builder
-        .add(
-            "compressed",
-            "*.{zip,gz,bz2,zst,lzo,sz,tgz,tbz2,lz,lz4,lzma,lzo,z,Z,xz,7z,rar,cab}",
-        )
-        .expect("Invalid type definition");
-    type_builder.negate("all");
-    type_builder
-        .build()
-        .expect("failed to build excluded_types")
+            cx.push_layer(Box::new(cmdline));
+        }
+        CmdlineStyle::Bottom => {
+            let mut prompt = Prompt::new(
+                prompt,
+                history_register,
+                completion_fn,
+                move |cx: &mut crate::compositor::Context, input: &str, event: PromptEvent| {
+                    match event {
+                        PromptEvent::Abort => {
+                            let (view, doc) = current!(cx.editor);
+                            doc.set_selection(view.id, snapshot.clone());
+                            doc.set_view_offset(view.id, offset_snapshot);
+                        }
+                        PromptEvent::Update | PromptEvent::Validate => {
+                            if input.is_empty() {
+                                return;
+                            }
+
+                            let case_insensitive = if config.search.smart_case {
+                                !input.chars().any(char::is_uppercase)
+                            } else {
+                                false
+                            };
+
+                            match rope::RegexBuilder::new()
+                                .syntax(
+                                    rope::Config::new()
+                                        .case_insensitive(case_insensitive)
+                                        .multi_line(true),
+                                )
+                                .build(input)
+                            {
+                                Ok(regex) => {
+                                    let (view, doc) = current!(cx.editor);
+
+                                    // revert state to what it was before the last update
+                                    doc.set_selection(view.id, snapshot.clone());
+
+                                    if event == PromptEvent::Validate {
+                                        // Equivalent to push_jump to store selection just before jump
+                                        view.jumps.push((doc_id, snapshot.clone()));
+                                    }
+
+                                    fun(cx, regex, input, event);
+
+                                    let (view, doc) = current!(cx.editor);
+                                    view.ensure_cursor_in_view(doc, config.scrolloff);
+                                }
+                                Err(err) => {
+                                    let (view, doc) = current!(cx.editor);
+                                    doc.set_selection(view.id, snapshot.clone());
+                                    doc.set_view_offset(view.id, offset_snapshot);
+
+                                    if event == PromptEvent::Validate {
+                                        let callback = async move {
+                                            let call: job::Callback = Callback::EditorCompositor(Box::new(
+                                                move |_editor: &mut Editor, compositor: &mut Compositor| {
+                                                    let contents = Text::new(format!("{}", err));
+                                                    let size = compositor.size();
+                                                    let popup = Popup::new("invalid-regex", contents)
+                                                        .position(Some(helix_core::Position::new(
+                                                            size.height as usize - 2, // 2 = statusline + commandline
+                                                            0,
+                                                        )))
+                                                        .auto_close(true);
+                                                    compositor.replace_or_push("invalid-regex", popup);
+                                                },
+                                            ));
+                                            Ok(call)
+                                        };
+
+                                        cx.jobs.callback(callback);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+            .with_language("regex", std::sync::Arc::clone(&cx.editor.syn_loader));
+            // Calculate initial completion
+            prompt.recalculate_completion(cx.editor);
+            // prompt
+            cx.push_layer(Box::new(prompt));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -215,7 +290,7 @@ pub struct FilePickerData {
 type FilePicker = Picker<PathBuf, FilePickerData>;
 
 pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
-    use ignore::WalkBuilder;
+    use ignore::{types::TypesBuilder, WalkBuilder};
     use std::time::Instant;
 
     let config = editor.config();
@@ -230,8 +305,7 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
     let absolute_root = root.canonicalize().unwrap_or_else(|_| root.clone());
 
     let mut walk_builder = WalkBuilder::new(&root);
-
-    let mut files = walk_builder
+    walk_builder
         .hidden(config.file_picker.hidden)
         .parents(config.file_picker.parents)
         .ignore(config.file_picker.ignore)
@@ -241,18 +315,31 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
         .git_exclude(config.file_picker.git_exclude)
         .sort_by_file_name(|name1, name2| name1.cmp(name2))
         .max_depth(config.file_picker.max_depth)
-        .filter_entry(move |entry| filter_picker_entry(entry, &absolute_root, dedup_symlinks))
-        .add_custom_ignore_filename(helix_loader::config_dir().join("ignore"))
-        .add_custom_ignore_filename(".helix/ignore")
-        .types(get_excluded_types())
+        .filter_entry(move |entry| filter_picker_entry(entry, &absolute_root, dedup_symlinks));
+
+    walk_builder.add_custom_ignore_filename(helix_loader::config_dir().join("ignore"));
+    walk_builder.add_custom_ignore_filename(".helix/ignore");
+
+    // We want to exclude files that the editor can't handle yet
+    let mut type_builder = TypesBuilder::new();
+    type_builder
+        .add(
+            "compressed",
+            "*.{zip,gz,bz2,zst,lzo,sz,tgz,tbz2,lz,lz4,lzma,lzo,z,Z,xz,7z,rar,cab}",
+        )
+        .expect("Invalid type definition");
+    type_builder.negate("all");
+    let excluded_types = type_builder
         .build()
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            if !entry.path().is_file() {
-                return None;
-            }
-            Some(entry.into_path())
-        });
+        .expect("failed to build excluded_types");
+    walk_builder.types(excluded_types);
+    let mut files = walk_builder.build().filter_map(|entry| {
+        let entry = entry.ok()?;
+        if !entry.path().is_file() {
+            return None;
+        }
+        Some(entry.into_path())
+    });
     log::debug!("file_picker init {:?}", Instant::now().duration_since(now));
 
     let columns = [PickerColumn::new(
@@ -282,16 +369,27 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
         },
     )];
     let picker = Picker::new(columns, 0, [], data, move |cx, path: &PathBuf, action| {
-        if let Err(e) = cx.editor.open(path, action) {
-            let err = if let Some(err) = e.source() {
-                format!("{}", err)
-            } else {
-                format!("unable to open \"{}\"", path.display())
-            };
-            cx.editor.set_error(err);
+        let path = helix_stdx::path::canonicalize(path);
+        let old_id = cx.editor.document_id_by_path(&path);
+
+        match cx.editor.open(&path, action) {
+            Ok(doc_id) => {
+                if old_id != Some(doc_id) {
+                    default_folding(cx.editor);
+                }
+            }
+            Err(e) => {
+                let err = if let Some(err) = e.source() {
+                    format!("{}", err)
+                } else {
+                    format!("unable to open \"{}\"", path.display())
+                };
+                cx.editor.set_error(err);
+            }
         }
     })
-    .with_preview(|_editor, path| Some((path.as_path().into(), None)));
+    .with_preview(|_editor, path| Some((path.as_path().into(), None)))
+    .show_preview(!config.file_picker.hide_preview);
     let injector = picker.injector();
     let timeout = std::time::Instant::now() + std::time::Duration::from_millis(30);
 
@@ -317,76 +415,25 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
     picker
 }
 
-type FileExplorer = Picker<(PathBuf, bool), (PathBuf, Style)>;
-
-pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std::io::Error> {
-    let directory_style = editor.theme.get("ui.text.directory");
-    let directory_content = directory_content(&root, editor)?;
-
-    let columns = [PickerColumn::new(
-        "path",
-        |(path, is_dir): &(PathBuf, bool), (_root, directory_style): &(PathBuf, Style)| {
-            let icons = ICONS.load();
-
-            let name = path.file_name();
-            // If path is `..` then this will be `None` and signifies being the
-            // previous directory, which said another way, is the currently open
-            // directory we are viewing.
-            let is_open = name.is_none() && *is_dir;
-
-            // Path `..` does not have a name, and so will become `..` as a string.
-            let name = name.map_or_else(|| Cow::Borrowed(".."), |dir| dir.to_string_lossy());
-
-            if *is_dir {
-                match icons.fs().directory(is_open) {
-                    Some(icon) => Span::styled(format!("{icon} {name}/"), *directory_style).into(),
-                    None => Span::styled(format!("{name}/"), *directory_style).into(),
-                }
-            } else if let Some(icon) = icons.fs().from_path(path) {
-                let mut spans = Vec::with_capacity(2);
-
-                spans.push(icon.to_span_with(|icon| format!("{icon} ")));
-                spans.push(Span::raw(name));
-
-                Cell::from(Spans::from(spans))
-            } else {
-                name.into()
-            }
-        },
-    )];
-    let picker = Picker::new(
-        columns,
-        0,
-        directory_content,
-        (root, directory_style),
-        move |cx, (path, is_dir): &(PathBuf, bool), action| {
-            if *is_dir {
-                let new_root = helix_stdx::path::normalize(path);
-                let callback = Box::pin(async move {
-                    let call: Callback =
-                        Callback::EditorCompositor(Box::new(move |editor, compositor| {
-                            if let Ok(picker) = file_explorer(new_root, editor) {
-                                compositor.push(Box::new(overlay::overlaid(picker)));
-                            }
-                        }));
-                    Ok(call)
-                });
-                cx.jobs.callback(callback);
-            } else if let Err(e) = cx.editor.open(path, action) {
-                let err = match e.source() {
-                    Some(err) => format!("{}", err),
-                    None => format!("unable to open \"{}\"", path.display()),
-                };
-                cx.editor.set_error(err);
-            }
-        },
-    )
-    .with_preview(|_editor, (path, _is_dir)| Some((path.as_path().into(), None)));
-
-    Ok(picker)
+fn get_excluded_types() -> ignore::types::Types {
+    use ignore::types::TypesBuilder;
+    let mut type_builder = TypesBuilder::new();
+    type_builder
+        .add(
+            "compressed",
+            "*.{zip,gz,bz2,zst,lzo,sz,tgz,tbz2,lz,lz4,lzma,lzo,z,Z,xz,7z,rar,cab}",
+        )
+        .expect("Invalid type definition");
+    type_builder.negate("all");
+    type_builder
+        .build()
+        .expect("failed to build excluded_types")
 }
 
-fn directory_content(root: &Path, editor: &Editor) -> Result<Vec<(PathBuf, bool)>, std::io::Error> {
+pub fn directory_content(
+    root: &Path,
+    editor: &Editor,
+) -> Result<Vec<(PathBuf, bool)>, std::io::Error> {
     use ignore::WalkBuilder;
 
     let config = editor.config();
@@ -425,11 +472,9 @@ fn directory_content(root: &Path, editor: &Editor) -> Result<Vec<(PathBuf, bool)
         .collect();
 
     content.sort_by(|(path1, is_dir1), (path2, is_dir2)| (!is_dir1, path1).cmp(&(!is_dir2, path2)));
-
     if root.parent().is_some() {
         content.insert(0, (root.join(".."), true));
     }
-
     Ok(content)
 }
 
@@ -444,6 +489,23 @@ fn get_child_if_single_dir(path: &Path) -> Option<PathBuf> {
     }
 }
 
+pub fn default_folding(editor: &mut Editor) {
+    use crate::commands::typed::{fold_textobjects, FOLD_SIGNATURE};
+    use helix_core::command_line::Args;
+
+    let textobjects = editor.config.load().fold_textobjects.join(" ");
+    if textobjects.is_empty() {
+        return;
+    }
+
+    let loader = editor.syn_loader.load();
+
+    let str = format!("--document {textobjects}");
+    let args = Args::parse(&str, FOLD_SIGNATURE, true, |token| Ok(token.content)).unwrap();
+
+    let (view, doc) = current!(editor);
+    _ = fold_textobjects(doc, view, &loader, args);
+}
 pub mod completers {
     use super::Utf8PathBuf;
     use crate::ui::prompt::Completion;
@@ -772,8 +834,7 @@ pub mod completers {
                 .flatten()
                 .filter_map(|res| {
                     let entry = res.ok()?;
-                    let file_type = entry.file_type().ok()?;
-                    if file_type.is_file() || file_type.is_symlink() {
+                    if entry.metadata().ok()?.is_file() {
                         entry.file_name().into_string().ok()
                     } else {
                         None
@@ -819,28 +880,12 @@ pub mod completers {
 
         completions
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use std::fs::{create_dir, File};
-
-    use super::*;
-
-    #[test]
-    fn test_get_child_if_single_dir() {
-        let root = tempfile::tempdir().unwrap();
-
-        assert_eq!(get_child_if_single_dir(root.path()), None);
-
-        let dir = root.path().join("dir1");
-        create_dir(&dir).unwrap();
-
-        assert_eq!(get_child_if_single_dir(root.path()), Some(dir));
-
-        let file = root.path().join("file");
-        File::create(file).unwrap();
-
-        assert_eq!(get_child_if_single_dir(root.path()), None);
+    pub fn foldable_textobjects(_editor: &Editor, input: &str) -> Vec<Completion> {
+        let textobjects = ["class", "function", "comment"];
+        fuzzy_match(input, textobjects.iter(), false)
+            .into_iter()
+            .map(|(name, _)| ((0..), (*name).into()))
+            .collect()
     }
 }

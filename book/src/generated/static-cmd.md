@@ -80,6 +80,8 @@
 | `search_selection_detect_word_boundaries` | Use current selection as the search pattern, automatically wrapping with `\b` on word boundaries | normal: `` * ``, select: `` * `` |
 | `make_search_word_bounded` | Modify current search to make it word bounded |  |
 | `global_search` | Global search in workspace folder | normal: `` <space>/ ``, select: `` <space>/ `` |
+| `local_search_grep` | Local search in buffer | normal: `` <space>l ``, select: `` <space>l `` |
+| `local_search_fuzzy` | Fuzzy local search in buffer | normal: `` <space>L ``, select: `` <space>L `` |
 | `extend_line` | Select current line, if already selected, extend to another line based on the anchor |  |
 | `extend_line_below` | Select current line, if already selected, extend to next line | normal: `` x ``, select: `` x `` |
 | `extend_line_above` | Select current line, if already selected, extend to previous line |  |
@@ -128,6 +130,8 @@
 | `goto_declaration` | Goto declaration | normal: `` gD ``, select: `` gD `` |
 | `add_newline_above` | Add newline above | normal: `` [<space> ``, select: `` [<space> `` |
 | `add_newline_below` | Add newline below | normal: `` ]<space> ``, select: `` ]<space> `` |
+| `move_lines_up` | Move current line selection up | normal: `` <C-k> ``, select: `` <C-k> `` |
+| `move_lines_down` | Move current line selection down | normal: `` <C-j> ``, select: `` <C-j> `` |
 | `goto_type_definition` | Goto type definition | normal: `` gy ``, select: `` gy `` |
 | `goto_implementation` | Goto implementation | normal: `` gi ``, select: `` gi `` |
 | `goto_file_start` | Goto line number `<n>` else file start | normal: `` gg `` |
@@ -214,6 +218,7 @@
 | `remove_primary_selection` | Remove primary selection | normal: `` <A-,> ``, select: `` <A-,> `` |
 | `completion` | Invoke completion popup | insert: `` <C-x> `` |
 | `hover` | Show docs for item under cursor | normal: `` <space>k ``, select: `` <space>k `` |
+| `hover_dump` | Show docs for item under cursor in a new buffer | normal: `` <space>K ``, select: `` <space>K `` |
 | `toggle_comments` | Comment/uncomment selections | normal: `` <C-c> ``, `` <space>c ``, select: `` <C-c> ``, `` <space>c `` |
 | `toggle_line_comments` | Line comment/uncomment selections | normal: `` <space><A-c> ``, select: `` <space><A-c> `` |
 | `toggle_block_comments` | Block comment/uncomment selections | normal: `` <space>C ``, select: `` <space>C `` |
@@ -235,10 +240,10 @@
 | `jump_view_left` | Jump to left split | normal: `` <C-w>h ``, `` <space>wh ``, `` <C-w><C-h> ``, `` <C-w><left> ``, `` <space>w<C-h> ``, `` <space>w<left> ``, select: `` <C-w>h ``, `` <space>wh ``, `` <C-w><C-h> ``, `` <C-w><left> ``, `` <space>w<C-h> ``, `` <space>w<left> `` |
 | `jump_view_up` | Jump to split above | normal: `` <C-w>k ``, `` <C-w><up> ``, `` <space>wk ``, `` <C-w><C-k> ``, `` <space>w<up> ``, `` <space>w<C-k> ``, select: `` <C-w>k ``, `` <C-w><up> ``, `` <space>wk ``, `` <C-w><C-k> ``, `` <space>w<up> ``, `` <space>w<C-k> `` |
 | `jump_view_down` | Jump to split below | normal: `` <C-w>j ``, `` <space>wj ``, `` <C-w><C-j> ``, `` <C-w><down> ``, `` <space>w<C-j> ``, `` <space>w<down> ``, select: `` <C-w>j ``, `` <space>wj ``, `` <C-w><C-j> ``, `` <C-w><down> ``, `` <space>w<C-j> ``, `` <space>w<down> `` |
-| `swap_view_right` | Swap with right split | normal: `` <C-w>L ``, `` <space>wL ``, select: `` <C-w>L ``, `` <space>wL `` |
-| `swap_view_left` | Swap with left split | normal: `` <C-w>H ``, `` <space>wH ``, select: `` <C-w>H ``, `` <space>wH `` |
-| `swap_view_up` | Swap with split above | normal: `` <C-w>K ``, `` <space>wK ``, select: `` <C-w>K ``, `` <space>wK `` |
-| `swap_view_down` | Swap with split below | normal: `` <C-w>J ``, `` <space>wJ ``, select: `` <C-w>J ``, `` <space>wJ `` |
+| `swap_view_right` | Swap with right split | normal: `` <C-w>L ``, `` <space>wL ``, `` <C-w><S-right> ``, `` <space>w<S-right> ``, select: `` <C-w>L ``, `` <space>wL ``, `` <C-w><S-right> ``, `` <space>w<S-right> `` |
+| `swap_view_left` | Swap with left split | normal: `` <C-w>H ``, `` <space>wH ``, `` <C-w><S-left> ``, `` <space>w<S-left> ``, select: `` <C-w>H ``, `` <space>wH ``, `` <C-w><S-left> ``, `` <space>w<S-left> `` |
+| `swap_view_up` | Swap with split above | normal: `` <C-w>K ``, `` <space>wK ``, `` <C-w><S-up> ``, `` <space>w<S-up> ``, select: `` <C-w>K ``, `` <space>wK ``, `` <C-w><S-up> ``, `` <space>w<S-up> `` |
+| `swap_view_down` | Swap with split below | normal: `` <C-w>J ``, `` <space>wJ ``, `` <C-w><S-down> ``, `` <space>w<S-down> ``, select: `` <C-w>J ``, `` <space>wJ ``, `` <C-w><S-down> ``, `` <space>w<S-down> `` |
 | `transpose_view` | Transpose splits | normal: `` <C-w>t ``, `` <space>wt ``, `` <C-w><C-t> ``, `` <space>w<C-t> ``, select: `` <C-w>t ``, `` <space>wt ``, `` <C-w><C-t> ``, `` <space>w<C-t> `` |
 | `rotate_view` | Goto next window | normal: `` <C-w>w ``, `` <space>ww ``, `` <C-w><C-w> ``, `` <space>w<C-w> ``, select: `` <C-w>w ``, `` <space>ww ``, `` <C-w><C-w> ``, `` <space>w<C-w> `` |
 | `rotate_view_reverse` | Goto previous window |  |
@@ -261,8 +266,28 @@
 | `surround_add` | Surround add | normal: `` ms ``, select: `` ms `` |
 | `surround_replace` | Surround replace | normal: `` mr ``, select: `` mr `` |
 | `surround_delete` | Surround delete | normal: `` md ``, select: `` md `` |
-| `select_textobject_around` | Select around object | normal: `` ma ``, select: `` ma `` |
-| `select_textobject_inner` | Select inside object | normal: `` mi ``, select: `` mi `` |
+| `select_textobject_inside_type` | Select inside type definition (tree-sitter) | normal: `` mit ``, select: `` mit `` |
+| `select_textobject_around_type` | Select around type definition (tree-sitter) | normal: `` mat ``, select: `` mat `` |
+| `select_textobject_inside_function` | Select inside function (tree-sitter) | normal: `` mif ``, select: `` mif `` |
+| `select_textobject_around_function` | Select around function (tree-sitter) | normal: `` maf ``, select: `` maf `` |
+| `select_textobject_inside_parameter` | Select inside argument/parameter (tree-sitter) | normal: `` mia ``, select: `` mia `` |
+| `select_textobject_around_parameter` | Select around argument/parameter (tree-sitter) | normal: `` maa ``, select: `` maa `` |
+| `select_textobject_inside_comment` | Select inside comment (tree-sitter) | normal: `` mic ``, select: `` mic `` |
+| `select_textobject_around_comment` | Select around comment (tree-sitter) | normal: `` mac ``, select: `` mac `` |
+| `select_textobject_inside_test` | Select inside test (tree-sitter) | normal: `` miT ``, select: `` miT `` |
+| `select_textobject_around_test` | Select around test (tree-sitter) | normal: `` maT ``, select: `` maT `` |
+| `select_textobject_inside_entry` | Select inside data structure entry (tree-sitter) | normal: `` mie ``, select: `` mie `` |
+| `select_textobject_around_entry` | Select around data structure entry (tree-sitter) | normal: `` mae ``, select: `` mae `` |
+| `select_textobject_inside_paragraph` | Select inside paragraph | normal: `` mip ``, select: `` mip `` |
+| `select_textobject_around_paragraph` | Select around paragraph | normal: `` map ``, select: `` map `` |
+| `select_textobject_inside_closest_surrounding_pair` | Select inside closest surrounding pair (tree-sitter) | normal: `` mim ``, select: `` mim `` |
+| `select_textobject_around_closest_surrounding_pair` | Select around closest surrounding pair (tree-sitter) | normal: `` mam ``, select: `` mam `` |
+| `select_textobject_inside_word` | Select inside word | normal: `` miw ``, select: `` miw `` |
+| `select_textobject_around_word` | Select around word | normal: `` maw ``, select: `` maw `` |
+| `select_textobject_inside_WORD` | Select inside WORD | normal: `` miW ``, select: `` miW `` |
+| `select_textobject_around_WORD` | Select around WORD | normal: `` maW ``, select: `` maW `` |
+| `select_textobject_inside_change` | Select inside VCS change | normal: `` mig ``, select: `` mig `` |
+| `select_textobject_around_change` | Select around VCS change | normal: `` mag ``, select: `` mag `` |
 | `goto_next_function` | Goto next function | normal: `` ]f ``, select: `` ]f `` |
 | `goto_prev_function` | Goto previous function | normal: `` [f ``, select: `` [f `` |
 | `goto_next_class` | Goto next type definition | normal: `` ]t ``, select: `` ]t `` |
@@ -311,5 +336,8 @@
 | `extend_to_word` | Extend to a two-character label | select: `` gw `` |
 | `goto_next_tabstop` | Goto next snippet placeholder |  |
 | `goto_prev_tabstop` | Goto next snippet placeholder |  |
+| `blame_line` | Show blame for the current line | normal: `` <space>B ``, select: `` <space>B `` |
 | `rotate_selections_first` | Make the first selection your primary one |  |
 | `rotate_selections_last` | Make the last selection your primary one |  |
+| `fold` | Fold text objects | normal: `` Zf ``, `` zf ``, select: `` Zf ``, `` zf `` |
+| `unfold` | Unfold text objects | normal: `` ZF ``, `` zF ``, select: `` ZF ``, `` zF `` |

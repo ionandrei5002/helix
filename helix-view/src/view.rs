@@ -1,6 +1,6 @@
 use crate::{
     align_view,
-    annotations::diagnostics::InlineDiagnostics,
+    annotations::{diagnostics::InlineDiagnostics, plugins::PluginLineAnnotations},
     document::{DocumentColorSwatches, DocumentInlayHints},
     editor::{GutterConfig, GutterType},
     graphics::Rect,
@@ -12,6 +12,7 @@ use helix_core::{
     char_idx_at_visual_offset,
     doc_formatter::TextFormat,
     text_annotations::TextAnnotations,
+    text_folding::{FoldAnnotations, RopeSliceFoldExt},
     visual_offset_from_anchor, visual_offset_from_block, Position, RopeSlice, Selection,
     Transaction,
     VisualOffsetError::{PosAfterMaxRow, PosBeforeAnchorRow},
@@ -192,6 +193,18 @@ impl View {
         self.docs_access_history.push(id);
     }
 
+    /// The range of lines in the document that the view sees
+    pub fn line_range(&self, doc: &Document) -> std::ops::Range<usize> {
+        let text = doc.text();
+        let text_line_count = text.len_lines();
+        let first_line = text.char_to_line(doc.view_offset(self.id).anchor.min(text.len_chars()));
+        let last_line = first_line
+            .saturating_add(self.inner_height())
+            .min(text_line_count);
+
+        first_line..last_line
+    }
+
     pub fn inner_area(&self, doc: &Document) -> Rect {
         self.area.clip_left(self.gutter_offset(doc)).clip_bottom(1) // -1 for statusline
     }
@@ -359,13 +372,14 @@ impl View {
     /// The actual last visible line may be smaller if softwrapping occurs
     /// or virtual text lines are visible
     #[inline]
-    pub fn estimate_last_doc_line(&self, doc: &Document) -> usize {
+    pub fn estimate_last_doc_line(&self, annotations: &TextAnnotations, doc: &Document) -> usize {
         let doc_text = doc.text().slice(..);
         let line = doc_text.char_to_line(doc.view_offset(self.id).anchor.min(doc_text.len_chars()));
-        // Saturating subs to make it inclusive zero indexing.
-        (line + self.inner_height())
-            .min(doc_text.len_lines())
-            .saturating_sub(1)
+        doc_text.nth_next_folded_line(
+            &annotations.folds,
+            line,
+            self.inner_height().saturating_sub(1),
+        )
     }
 
     /// Calculates the last non-empty visual line on screen
@@ -381,7 +395,7 @@ impl View {
         let visual_height = doc.view_offset(self.id).vertical_offset + viewport.height as usize;
 
         // fast path when the EOF is not visible on the screen,
-        if self.estimate_last_doc_line(doc) < doc_text.len_lines() - 1 {
+        if self.estimate_last_doc_line(&annotations, doc) < doc_text.len_lines() - 1 {
             return visual_height.saturating_sub(1);
         }
 
@@ -514,6 +528,17 @@ impl View {
         }
 
         text_annotations
+            .add_line_annotation(Box::new(PluginLineAnnotations::new(doc, self.id, width)));
+
+        if let Some(fold_container) = doc.fold_container(self.id) {
+            text_annotations.add_folds(fold_container);
+        }
+
+        text_annotations
+    }
+
+    pub fn fold_annotations<'a>(&self, doc: &'a Document) -> FoldAnnotations<'a> {
+        FoldAnnotations::new(doc.fold_container(self.id))
     }
 
     pub fn text_pos_at_screen_coords(

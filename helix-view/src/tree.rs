@@ -29,6 +29,16 @@ pub enum Content {
     Container(Box<Container>),
 }
 
+pub enum Resize {
+    Shrink,
+    Grow,
+}
+
+pub enum Dimension {
+    Width,
+    Height,
+}
+
 impl Node {
     pub fn container(layout: Layout) -> Self {
         Self {
@@ -65,6 +75,14 @@ pub struct Container {
     layout: Layout,
     children: Vec<ViewId>,
     area: Rect,
+    node_bounds: Vec<ContainerBounds>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ContainerBounds {
+    width: usize,
+    height: usize,
+    expand: bool,
 }
 
 impl Container {
@@ -73,7 +91,68 @@ impl Container {
             layout,
             children: Vec::new(),
             area: Rect::default(),
+            node_bounds: Vec::new(),
         }
+    }
+
+    fn get_child_by_view_id(&mut self, node: ViewId) -> Option<&mut ContainerBounds> {
+        self.children
+            .iter()
+            .position(|child| child == &node)
+            .and_then(|index| self.node_bounds.get_mut(index))
+    }
+
+    fn push_child(&mut self, node: ViewId) -> &mut Self {
+        self.children.push(node);
+        self.add_child_bounds();
+        self
+    }
+
+    fn insert_child(&mut self, index: usize, node: ViewId) -> &mut Self {
+        self.children.insert(index, node);
+        self.insert_child_bounds(index);
+        self
+    }
+
+    fn add_child_bounds(&mut self) -> &mut Self {
+        self.node_bounds.push(ContainerBounds {
+            width: 10,
+            height: 10,
+            expand: false,
+        });
+        self
+    }
+
+    fn insert_child_bounds(&mut self, index: usize) -> &mut Self {
+        self.node_bounds.insert(
+            index,
+            ContainerBounds {
+                width: 10,
+                height: 10,
+                expand: false,
+            },
+        );
+        self
+    }
+
+    fn calculate_slots_width(&self) -> usize {
+        self.node_bounds
+            .iter()
+            .map(|bounds| match bounds.expand {
+                true => 40,
+                false => bounds.width,
+            })
+            .sum()
+    }
+
+    fn calculate_slots_height(&self) -> usize {
+        self.node_bounds
+            .iter()
+            .map(|bounds| match bounds.expand {
+                true => 40,
+                false => bounds.height,
+            })
+            .sum()
     }
 }
 
@@ -131,7 +210,7 @@ impl Tree {
             pos + 1
         };
 
-        container.children.insert(pos, node);
+        container.insert_child(pos, node);
         // focus the new node
         self.focus = node;
 
@@ -168,7 +247,7 @@ impl Tree {
                     .unwrap();
                 pos + 1
             };
-            container.children.insert(pos, node);
+            container.insert_child(pos, node);
             self.nodes[node].parent = parent;
         } else {
             let mut split = Node::container(layout);
@@ -182,8 +261,8 @@ impl Tree {
                 } => container,
                 _ => unreachable!(),
             };
-            container.children.push(focus);
-            container.children.push(node);
+            container.push_child(focus);
+            container.push_child(node);
             self.nodes[focus].parent = split;
             self.nodes[node].parent = split;
 
@@ -382,12 +461,17 @@ impl Tree {
                     match container.layout {
                         Layout::Horizontal => {
                             let len = container.children.len();
-
-                            let height = area.height / len as u16;
-
+                            let slots = container.calculate_slots_height();
+                            let slot_height = area.height as f32 / slots as f32;
                             let mut child_y = area.y;
 
                             for (i, child) in container.children.iter().enumerate() {
+                                let bounds = container.node_bounds[i];
+                                let height = match bounds.expand {
+                                    true => (40.0 * slot_height) as u16,
+                                    false => (slot_height * bounds.height as f32).floor() as u16,
+                                };
+
                                 let mut area = Rect::new(
                                     container.area.x,
                                     child_y,
@@ -396,7 +480,7 @@ impl Tree {
                                 );
                                 child_y += height;
 
-                                // last child takes the remaining width because we can get uneven
+                                // last child takes the remaining height because we can get uneven
                                 // space from rounding
                                 if i == len - 1 {
                                     area.height = container.area.y + container.area.height - area.y;
@@ -410,24 +494,58 @@ impl Tree {
                             let len_u16 = len as u16;
 
                             let inner_gap = 1u16;
-                            let total_gap = inner_gap * len_u16.saturating_sub(2);
+                            // There are (len - 1) inner gaps
+                            let total_gap = inner_gap * len_u16.saturating_sub(1);
 
                             let used_area = area.width.saturating_sub(total_gap);
-                            let width = used_area / len_u16;
+
+                            let slots = container.calculate_slots_width();
+                            let slot_width: f32 = used_area as f32 / slots as f32;
+
+                            // Pre-compute child widths using floor, then distribute remaining pixels fairly
+                            let mut base_widths: Vec<u16> = Vec::with_capacity(len);
+                            let mut sum_widths: u16 = 0;
+                            for i in 0..len {
+                                let bounds = container.node_bounds[i];
+                                let w = match bounds.expand {
+                                    true => (40.0 * slot_width).floor() as u16,
+                                    false => (slot_width * bounds.width as f32).floor() as u16,
+                                };
+                                base_widths.push(w);
+                                sum_widths = sum_widths.saturating_add(w);
+                            }
+
+                            let mut remaining: u16 = used_area.saturating_sub(sum_widths);
+                            let mut widths = base_widths;
+                            // Distribute the remainder from left to right to avoid biasing the last pane
+                            let mut idx = 0usize;
+                            while remaining > 0 && len > 0 {
+                                widths[idx] = widths[idx].saturating_add(1);
+                                remaining -= 1;
+                                idx += 1;
+                                if idx >= len {
+                                    idx = 0;
+                                }
+                            }
 
                             let mut child_x = area.x;
-
                             for (i, child) in container.children.iter().enumerate() {
+                                let width = widths[i];
                                 let mut area = Rect::new(
                                     child_x,
                                     container.area.y,
                                     width,
                                     container.area.height,
                                 );
-                                child_x += width + inner_gap;
 
-                                // last child takes the remaining width because we can get uneven
-                                // space from rounding
+                                // Advance x; add inner gap only between children
+                                if i < len - 1 {
+                                    child_x = child_x.saturating_add(width + inner_gap);
+                                } else {
+                                    child_x = child_x.saturating_add(width);
+                                }
+
+                                // Ensure last child takes any 1px drift due to rounding
                                 if i == len - 1 {
                                     area.width = container.area.x + container.area.width - area.x;
                                 }
@@ -594,6 +712,104 @@ impl Tree {
             };
             self.recalculate();
         }
+    }
+
+    fn get_active_node_bounds_mut(
+        &mut self,
+        expect_layout: Layout,
+    ) -> Option<&mut ContainerBounds> {
+        let mut focus = self.focus;
+        let mut parent = self.nodes[focus].parent;
+
+        // Parent expected to be container
+        if let Some(focused_layout) = match &self.nodes[parent].content {
+            Content::View(_) => unreachable!(),
+            Content::Container(node) => Some(node.layout),
+        } {
+            // if we want to make a width change and we have a `Horizontal` layout focused,
+            // alter the parent `Vertical` layout instead and vice versa
+            if focused_layout != expect_layout {
+                focus = parent;
+                parent = self.nodes[parent].parent;
+            }
+
+            if let Content::Container(node) = &mut self.nodes[parent].content {
+                return node.as_mut().get_child_by_view_id(focus);
+            };
+        }
+        None
+    }
+
+    pub fn resize_buffer(
+        &mut self,
+        resize_type: Resize,
+        dimension: Dimension,
+        config: &crate::editor::Config,
+    ) {
+        match dimension {
+            Dimension::Width => {
+                let terminal_width = self.area.width;
+                if let Some(bounds) = self.get_active_node_bounds_mut(Layout::Vertical) {
+                    match resize_type {
+                        Resize::Shrink => {
+                            if bounds.width > 1 {
+                                bounds.width -= 1;
+                            }
+                        }
+                        Resize::Grow => {
+                            let max_width = if config.max_panel_width == 0 {
+                                // Dynamic limit based on configurable percentage of terminal width
+                                (terminal_width as f32 * config.max_panel_width_percent) as usize
+                            } else {
+                                config.max_panel_width
+                            };
+
+                            if bounds.width < max_width {
+                                bounds.width += 1;
+                            }
+                        }
+                    };
+                    self.recalculate();
+                }
+            }
+            Dimension::Height => {
+                let terminal_height = self.area.height;
+                if let Some(bounds) = self.get_active_node_bounds_mut(Layout::Horizontal) {
+                    match resize_type {
+                        Resize::Shrink => {
+                            if bounds.height > 1 {
+                                bounds.height -= 1;
+                            }
+                        }
+                        Resize::Grow => {
+                            let max_height = if config.max_panel_height == 0 {
+                                // Dynamic limit based on configurable percentage of terminal height
+                                (terminal_height as f32 * config.max_panel_height_percent) as usize
+                            } else {
+                                config.max_panel_height
+                            };
+
+                            if bounds.height < max_height {
+                                bounds.height += 1;
+                            }
+                        }
+                    };
+                    self.recalculate();
+                }
+            }
+        }
+    }
+
+    pub fn toggle_focus_window(&mut self) {
+        if let Some(bounds) = self.get_active_node_bounds_mut(Layout::Horizontal) {
+            bounds.expand = !bounds.expand;
+        }
+
+        if let Some(bounds) = self.get_active_node_bounds_mut(Layout::Vertical) {
+            bounds.expand = !bounds.expand;
+        }
+
+        self.recalculate();
     }
 
     pub fn swap_split_in_direction(&mut self, direction: Direction) -> Option<()> {
@@ -927,9 +1143,9 @@ mod test {
         assert_eq!(3, tree.views().count());
         assert_eq!(
             vec![
+                tree_area_width / 3,
                 tree_area_width / 3 - 1, // gap here
                 tree_area_width / 3 - 1, // gap here
-                tree_area_width / 3
             ],
             tree.views()
                 .map(|(view, _)| view.area.width)
@@ -957,8 +1173,8 @@ mod test {
 
         assert_eq!(10, tree.views().count());
         assert_eq!(
-            std::iter::repeat_n(7, 9)
-                .chain(Some(8)) // Rounding in `recalculate`.
+            std::iter::once(8) // Rounding in `recalculate`.
+                .chain(std::iter::repeat_n(7, 9))
                 .collect::<Vec<_>>(),
             tree.views()
                 .map(|(view, _)| view.area.width)

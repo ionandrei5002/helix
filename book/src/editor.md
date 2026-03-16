@@ -9,6 +9,7 @@
 - [`[editor.file-explorer]` Section](#editorfile-explorer-section)
 - [`[editor.buffer-picker]` Section](#editorbuffer-picker-section)
 - [`[editor.auto-pairs]` Section](#editorauto-pairs-section)
+- [`[editor.auto-reload]` Section](#editorauto-reload-section)
 - [`[editor.auto-save]` Section](#editorauto-save-section)
 - [`[editor.search]` Section](#editorsearch-section)
 - [`[editor.whitespace]` Section](#editorwhitespace-section)
@@ -22,6 +23,7 @@
 - [`[editor.smart-tab]` Section](#editorsmart-tab-section)
 - [`[editor.inline-diagnostics]` Section](#editorinline-diagnostics-section)
 - [`[editor.word-completion]` Section](#editorword-completion-section)
+- [`[editor.completion-highlight]` Section](#editorcompletion-highlight-section)
 
 ### `[editor]` Section
 
@@ -170,7 +172,6 @@ The following statusline elements can be configured:
 | `display-inlay-hints` | Display inlay hints[^2]                                     | `false` |
 | `inlay-hints-length-limit` | Maximum displayed length (non-zero number) of inlay hints | Unset by default  |
 | `display-color-swatches` | Show color swatches next to colors | `true` |
-| `color-swatches-string` | String used for displaying color swatches | `"■"` |
 | `display-signature-help-docs` | Display docs under signature help popup             | `true`  |
 | `snippets`      | Enables snippet completions. Requires a server restart (`:lsp-restart`) to take effect after `:config-reload`/`:set`. | `true`  |
 | `goto-reference-include-declaration` | Include declaration in the goto references popup. | `true`  |
@@ -307,6 +308,16 @@ name = "rust"
 '`' = '`'
 '<' = '>'
 ```
+
+### `[editor.auto-reload]` Section
+
+Controls auto reloading of externally modified files.
+
+| Key | Description | Default |
+|--|--|---------|
+| `focus-gained` | Enable automatic reloading of externally modified files when Helix is focused. Requires [focus event support](https://github.com/helix-editor/helix/wiki/Terminal-Support) from your terminal | `false` |
+| `periodic.enable` | Enable periodic auto reloading of externally modified files | `false` |
+| `periodic.interval` | Time interval in milliseconds between auto reload checks | `3000` |
 
 ### `[editor.auto-save]` Section
 
@@ -528,4 +539,19 @@ Example:
 enable = true
 # Set the trigger length lower so that words are completed more often
 trigger-length = 4
+```
+
+### `[editor.completion-highlight]` Section
+
+Option for different coloring of completions
+
+| Key                  | Description                                                                              | Default  |
+| ---                  | ---                                                                                      | ---      |
+| `highlight-type`     | What kind completion highlighting we will display ("default", "theme-colors", "vibrant") | `default`|
+
+Example:
+
+```toml
+[editor.completion-highlight]
+highlight-type = "vibrant"
 ```

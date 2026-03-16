@@ -395,6 +395,9 @@ impl Backend for TerminaBackend {
         self.enable_mouse_capture()?;
         self.enable_extensions()?;
 
+        // Ensure mode changes (alt-screen, mouse, etc.) take effect immediately.
+        self.terminal.flush()?;
+
         Ok(())
     }
 
@@ -406,6 +409,8 @@ impl Backend for TerminaBackend {
             } else {
                 self.disable_mouse_capture()?;
             }
+            // Apply mouse mode change immediately.
+            self.terminal.flush()?;
         }
         self.capabilities.extended_underlines |= self.config.force_enable_extended_underlines;
         Ok(())
