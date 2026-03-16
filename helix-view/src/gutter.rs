@@ -138,8 +138,7 @@ pub fn diff<'doc>(
                     (icons.gutter().modified(), modified)
                 };
 
-                write!(out, "{icon}").unwrap();
-
+                write!(out, "{}", icon).unwrap();
                 Some(style)
             },
         )
@@ -384,9 +383,8 @@ fn execution_pause_indicator<'doc>(
                 return None;
             }
 
-            let icons = ICONS.load();
-
-            write!(out, "{}", icons.dap().play()).unwrap();
+            let sym = "▶";
+            write!(out, "{}", sym).unwrap();
             Some(style)
         },
     )
