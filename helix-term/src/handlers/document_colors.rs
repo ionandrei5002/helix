@@ -8,7 +8,6 @@ use helix_view::{
     document::DocumentColorSwatches,
     events::{DocumentDidChange, DocumentDidOpen, LanguageServerExited, LanguageServerInitialized},
     handlers::{lsp::DocumentColorsEvent, Handlers},
-    icons::ICONS,
     DocumentId, Editor, Theme,
 };
 use tokio::time::Instant;
@@ -106,9 +105,13 @@ fn attach_document_colors(
     doc_id: DocumentId,
     mut doc_colors: Vec<(usize, lsp::Color)>,
 ) {
-    if !editor.config().lsp.display_color_swatches {
+    let config = editor.config();
+
+    if !config.lsp.display_color_swatches {
         return;
     }
+
+    let color_swatch_string = &config.lsp.color_swatches_string;
 
     let Some(doc) = editor.documents.get_mut(&doc_id) else {
         return;
