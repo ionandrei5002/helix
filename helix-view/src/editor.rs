@@ -50,7 +50,6 @@ use helix_core::{
         self,
         config::{AutoPairConfig, IndentationHeuristic, LanguageServerFeature, SoftWrap},
     },
-    Change, LineEnding, Position, Range, Selection, Uri, NATIVE_LINE_ENDING,
 };
 use helix_dap::{self as dap, registry::DebugAdapterId};
 use helix_lsp::lsp;
@@ -2413,14 +2412,10 @@ impl Editor {
 
 fn try_restore_indent(doc: &mut Document, view: &mut View) {
     use helix_core::{
-<<<<<<< HEAD
         chars::char_is_whitespace,
         line_ending::{line_end_char_index, str_is_line_ending},
         unicode::segmentation::UnicodeSegmentation,
         Operation, Transaction,
-=======
-        Operation, Transaction, chars::char_is_whitespace, line_ending::line_end_char_index,
->>>>>>> q60/customizable-color-swatches
     };
 
     fn inserted_a_new_blank_line(changes: &[Operation], pos: usize, line_end_pos: usize) -> bool {
